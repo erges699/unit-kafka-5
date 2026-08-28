@@ -75,6 +75,39 @@ services:
     networks:
       - proxynet
 
+  producer:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    command: ["python", "producer.py"]
+    depends_on:
+      - kafka-0
+      - kafka-1
+      - kafka-2
+
+  single-consumer:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    command: ["python", "single_consumer.py"]
+    depends_on:
+      - kafka-0
+      - kafka-1
+      - kafka-2
+    deploy:
+      replicas: 2
+
+  batch-consumer:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    command: ["python", "batch_consumer.py"]
+    depends_on:
+      - kafka-0
+      - kafka-1
+      - kafka-2
+    deploy:
+      replicas: 2
 
 networks:
   proxynet:
