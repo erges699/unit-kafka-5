@@ -1,0 +1,3 @@
+subjectAltName=DNS:kafka-3,DNS:kafka-3-external,DNS:localhost
+extendedKeyUsage=serverAuth,clientAuth
+keyUsage=digitalSignature,keyEncipherment

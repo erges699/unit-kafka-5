@@ -1,119 +1,159 @@
-# Общие настройки Kafka для переиспользования в каждом брокере
+# ============================================================================
+# Кластер Apache Kafka (KRaft) из трёх брокеров с защищённым SSL/mTLS соединением
+#
+# Роли:
+#   kafka-1 : broker + controller (единственный контроллер KRaft-кворума)
+#   kafka-2 : broker
+#   kafka-3 : broker
+#
+# Лисенеры:
+#   INTERNAL   : SSL        на 9092 — межброкерное и внутреннее взаимодействие
+#   CONTROLLER : PLAINTEXT  на 9093 — KRaft-контроллер (только на kafka-1)
+#   EXTERNAL   : SSL        на 9094/9095/9096 — для внешних клиентов
+#
+# Аутентификация: взаимный TLS (ssl.client.auth=required).
+# Принципал клиента берётся из CN сертификата через ssl.principal.mapping.rules.
+# Авторизация: StandardAuthorizer (KRaft) + ACL (см. scripts/setup_cluster.sh).
+#
+# Запуск:
+#   bash scripts/generate_certs.sh     # сгенерировать сертификаты (при необходимости)
+#   docker compose up -d --build kafka-1 kafka-2 kafka-3 setup
+#   docker compose logs -f setup       # дождаться создания топиков и ACL
+# ============================================================================
+
 x-kafka-common: &kafka-common
   image: bitnamilegacy/kafka:3.7
   restart: always
   environment: &kafka-common-env
     KAFKA_ENABLE_KRAFT: yes
-    ALLOW_PLAINTEXT_LISTENER: yes
-    KAFKA_KRAFT_CLUSTER_ID: practicum
-    KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT,PLAINTEXT:PLAINTEXT"
-    KAFKA_CFG_PROCESS_ROLES: broker,controller
+    ALLOW_PLAINTEXT_LISTENER: no
+    KAFKA_KRAFT_CLUSTER_ID: unit5-ssl-kraft-cluster
+    KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: 1@kafka-1:9093
+    # Контроллер KRaft (нужен и для broker-only узлов, чтобы знать протокол)
     KAFKA_CFG_CONTROLLER_LISTENER_NAMES: CONTROLLER
-    KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: 0@kafka-0:9093,1@kafka-1:9093,2@kafka-2:9093
+    # Карта протоколов безопасности лисенеров
+    KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,INTERNAL:SSL,EXTERNAL:SSL"
+    # Межброкерный лисенер — SSL
+    KAFKA_CFG_INTER_BROKER_LISTENER_NAME: INTERNAL
+    # Общие SSL-настройки
+    KAFKA_CFG_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM: ""
+    KAFKA_CFG_SSL_CLIENT_AUTH: required
+    # Keystore / Truststore (стандартные имена Bitnami в каталоге certs)
+    KAFKA_TLS_TYPE: JKS
+    KAFKA_CERTIFICATE_PASSWORD: kafka-password
+    # Авторизация через ACL (KRaft StandardAuthorizer).
+    # Принцип: «разрешено по умолчанию» + явные DENY-ACL для запретов
+    # (например, запрет чтения topic-2 для консьюмера). Так внутренние
+    # KRaft-запросы (User:ANONYMOUS) не блокируют формирование кластера.
+    KAFKA_CFG_AUTHORIZER_CLASS_NAME: org.apache.kafka.metadata.authorizer.StandardAuthorizer
+    KAFKA_CFG_SUPER_USERS: "User:admin"
+    KAFKA_CFG_ALLOW_EVERYONE_IF_NO_ACL_FOUND: true
+    # Преобразование DN сертификата в короткий принципал (CN)
+    KAFKA_CFG_SSL_PRINCIPAL_MAPPING_RULES: "RULE:^CN=(.*?),.*$/$1/,DEFAULT"
+    # Топики создаём вручную через скрипт setup
     KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: false
   networks:
     - proxynet
 
 services:
 
-  # Первый брокер Kafka
-  kafka-0:
+  # --------------------- Брокер 1 (broker + controller) ---------------------
+  kafka-1:
     <<: *kafka-common
+    container_name: kafka-1
     ports:
       - "127.0.0.1:9094:9094"
     environment:
       <<: *kafka-common-env
-      KAFKA_CFG_NODE_ID: 0
-      KAFKA_CFG_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:9094
-      KAFKA_CFG_ADVERTISED_LISTENERS: PLAINTEXT://kafka-0:9092,EXTERNAL://127.0.0.1:9094
+      KAFKA_CFG_PROCESS_ROLES: broker,controller
+      KAFKA_CFG_NODE_ID: 1
+      KAFKA_CFG_LISTENERS: "INTERNAL://:9092,CONTROLLER://:9093,EXTERNAL://:9094"
+      KAFKA_CFG_ADVERTISED_LISTENERS: "INTERNAL://kafka-1:9092,EXTERNAL://localhost:9094"
     volumes:
-      - kafka_0_data:/bitnami/kafka
+      - kafka_1_data:/bitnami/kafka
+      - ./kafka-1-creds:/opt/bitnami/kafka/config/certs:ro
 
-  # Второй брокер Kafka
-  kafka-1:
+  # ----------------------------- Брокер 2 -----------------------------
+  kafka-2:
     <<: *kafka-common
+    container_name: kafka-2
     ports:
       - "127.0.0.1:9095:9095"
     environment:
       <<: *kafka-common-env
-      KAFKA_CFG_NODE_ID: 1
-      KAFKA_CFG_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:9095
-      KAFKA_CFG_ADVERTISED_LISTENERS: PLAINTEXT://kafka-1:9092,EXTERNAL://127.0.0.1:9095
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,SSL:SSL
-      KAFKA_SSL_KEYSTORE_FILENAME: kafka.kafka-1.keystore.pkcs12
-      KAFKA_SSL_KEYSTORE_CREDENTIALS: kafka-1_keystore_creds
-      KAFKA_SSL_KEY_CREDENTIALS: kafka-1_sslkey_creds
-      KAFKA_SSL_TRUSTSTORE_FILENAME: kafka.kafka-1.truststore.jks
-      KAFKA_SSL_TRUSTSTORE_CREDENTIALS: kafka-1_truststore_creds
-      KAFKA_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM: https
+      KAFKA_CFG_PROCESS_ROLES: broker
+      KAFKA_CFG_NODE_ID: 2
+      KAFKA_CFG_LISTENERS: "INTERNAL://:9092,EXTERNAL://:9095"
+      KAFKA_CFG_ADVERTISED_LISTENERS: "INTERNAL://kafka-2:9092,EXTERNAL://localhost:9095"
     volumes:
-      - kafka_1_data:/bitnami/kafka
-      - ./kafka-1-creds:/etc/kafka/secrets
+      - kafka_2_data:/bitnami/kafka
+      - ./kafka-2-creds:/opt/bitnami/kafka/config/certs:ro
 
-  # Третий брокер Kafka
-  kafka-2:
+  # ----------------------------- Брокер 3 -----------------------------
+  kafka-3:
     <<: *kafka-common
+    container_name: kafka-3
     ports:
       - "127.0.0.1:9096:9096"
     environment:
       <<: *kafka-common-env
-      KAFKA_CFG_NODE_ID: 2
-      KAFKA_CFG_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:9096
-      KAFKA_CFG_ADVERTISED_LISTENERS: PLAINTEXT://kafka-2:9092,EXTERNAL://127.0.0.1:9096
+      KAFKA_CFG_PROCESS_ROLES: broker
+      KAFKA_CFG_NODE_ID: 3
+      KAFKA_CFG_LISTENERS: "INTERNAL://:9092,EXTERNAL://:9096"
+      KAFKA_CFG_ADVERTISED_LISTENERS: "INTERNAL://kafka-3:9092,EXTERNAL://localhost:9096"
     volumes:
-      - kafka_2_data:/bitnami/kafka
+      - kafka_3_data:/bitnami/kafka
+      - ./kafka-3-creds:/opt/bitnami/kafka/config/certs:ro
 
-  # Интерфейс управления Kafka (Kafka UI)
-  ui:
-    image: provectuslabs/kafka-ui:v0.7.0
-    restart: always
-    ports:
-      - "127.0.0.1:8080:8080"
-    environment:
-      KAFKA_CLUSTERS_0_BOOTSTRAP_SERVERS: kafka-0:9092,kafka-1:9092,kafka-2:9092
-      KAFKA_CLUSTERS_0_NAME: kraft
+  # ----------------------------- Настройка -----------------------------
+  # Создаёт топики topic-1, topic-2 и применяет ACL.
+  setup:
+    image: bitnamilegacy/kafka:3.7
+    container_name: kafka-setup
+    depends_on:
+      - kafka-1
+      - kafka-2
+      - kafka-3
+    entrypoint: ["/bin/bash", "/setup_cluster.sh"]
+    volumes:
+      - ./scripts/setup_cluster.sh:/setup_cluster.sh:ro
+      - ./client-creds:/certs:ro
     networks:
       - proxynet
 
+  # ----------------------------- Продюсер -----------------------------
   producer:
     build:
       context: ./app
       dockerfile: Dockerfile
+    container_name: kafka-producer
     command: ["python", "producer.py"]
+    volumes:
+      - ./client-creds:/app/certs:ro
     depends_on:
-      - kafka-0
-      - kafka-1
-      - kafka-2
+      - setup
+    networks:
+      - proxynet
 
-  single-consumer:
+  # ----------------------------- Консьюмер -----------------------------
+  consumer:
     build:
       context: ./app
       dockerfile: Dockerfile
-    command: ["python", "single_consumer.py"]
+    container_name: kafka-consumer
+    command: ["python", "consumer.py"]
+    volumes:
+      - ./client-creds:/app/certs:ro
     depends_on:
-      - kafka-0
-      - kafka-1
-      - kafka-2
-    deploy:
-      replicas: 2
-
-  batch-consumer:
-    build:
-      context: ./app
-      dockerfile: Dockerfile
-    command: ["python", "batch_consumer.py"]
-    depends_on:
-      - kafka-0
-      - kafka-1
-      - kafka-2
-    deploy:
-      replicas: 2
+      - setup
+    networks:
+      - proxynet
 
 networks:
   proxynet:
     name: custom_network
 
 volumes:
-  kafka_0_data:
   kafka_1_data:
   kafka_2_data:
+  kafka_3_data:
